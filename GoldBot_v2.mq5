@@ -6,123 +6,112 @@
 CTrade trade;
 
 input double LotSize = 0.01;
+input int StopLossPoints = 300;
+input int TakeProfitPoints = 600;
 input int FastEMA = 9;
 input int SlowEMA = 21;
 input int RSIPeriod = 14;
-input double BuyRSILevel = 50.0;
-input double SellRSILevel = 50.0;
-input int StopLossPoints = 300;
-input int TakeProfitPoints = 600;
+input double BuyRSI = 55.0;
+input double SellRSI = 45.0;
 input ulong MagicNumber = 20261026;
 
-int fastHandle = INVALID_HANDLE;
-int slowHandle = INVALID_HANDLE;
-int rsiHandle = INVALID_HANDLE;
-datetime lastBarTime = 0;
+int fastHandle, slowHandle, rsiHandle;
+datetime lastBar = 0;
 
 int OnInit()
 {
-   fastHandle = iMA(_Symbol, PERIOD_M15, FastEMA,
-                    0, MODE_EMA, PRICE_CLOSE);
-   slowHandle = iMA(_Symbol, PERIOD_M15, SlowEMA,
-                    0, MODE_EMA, PRICE_CLOSE);
-   rsiHandle = iRSI(_Symbol, PERIOD_M15,
+   trade.SetExpertMagicNumber(MagicNumber);
+
+   fastHandle = iMA(_Symbol, PERIOD_CURRENT,
+                    FastEMA, 0, MODE_EMA, PRICE_CLOSE);
+   slowHandle = iMA(_Symbol, PERIOD_CURRENT,
+                    SlowEMA, 0, MODE_EMA, PRICE_CLOSE);
+   rsiHandle = iRSI(_Symbol, PERIOD_CURRENT,
                     RSIPeriod, PRICE_CLOSE);
 
    if(fastHandle == INVALID_HANDLE ||
       slowHandle == INVALID_HANDLE ||
       rsiHandle == INVALID_HANDLE)
    {
-      Print("Failed to initialize indicators");
+      Print("Indicator initialization failed");
       return INIT_FAILED;
    }
 
-   trade.SetExpertMagicNumber(MagicNumber);
-
-   Print("GoldBot_v2 EMA + RSI initialized");
+   Print("GoldBot_v2 initialized");
    return INIT_SUCCEEDED;
 }
 
 void OnDeinit(const int reason)
 {
-   if(fastHandle != INVALID_HANDLE)
-      IndicatorRelease(fastHandle);
-
-   if(slowHandle != INVALID_HANDLE)
-      IndicatorRelease(slowHandle);
-
-   if(rsiHandle != INVALID_HANDLE)
-      IndicatorRelease(rsiHandle);
+   IndicatorRelease(fastHandle);
+   IndicatorRelease(slowHandle);
+   IndicatorRelease(rsiHandle);
 }
 
 void OnTick()
 {
-   datetime barTime = iTime(_Symbol, PERIOD_M15, 0);
+   datetime barTime = iTime(_Symbol, PERIOD_CURRENT, 0);
 
-   if(barTime == 0 || barTime == lastBarTime)
+   if(barTime == lastBar || barTime == 0)
       return;
 
-   lastBarTime = barTime;
+   lastBar = barTime;
 
-   if(BarsCalculated(fastHandle) < SlowEMA + 3 ||
-      BarsCalculated(slowHandle) < SlowEMA + 3 ||
-      BarsCalculated(rsiHandle) < RSIPeriod + 3)
+   double fast[3], slow[3], rsi[3];
+   ArraySetAsSeries(fast, true);
+   ArraySetAsSeries(slow, true);
+   ArraySetAsSeries(rsi, true);
+
+   if(CopyBuffer(fastHandle, 0, 0, 3, fast) != 3 ||
+      CopyBuffer(slowHandle, 0, 0, 3, slow) != 3 ||
+      CopyBuffer(rsiHandle, 0, 0, 3, rsi) != 3)
       return;
-
-   double fast[2], slow[2], rsi[1];
-
-   if(CopyBuffer(fastHandle, 0, 1, 2, fast) != 2)
-      return;
-
-   if(CopyBuffer(slowHandle, 0, 1, 2, slow) != 2)
-      return;
-
-   if(CopyBuffer(rsiHandle, 0, 1, 1, rsi) != 1)
-      return;
-
-   // Index 0 = older closed candle
-   // Index 1 = most recent closed candle
 
    bool buySignal =
-      fast[0] <= slow[0] &&
+      fast[2] <= slow[2] &&
       fast[1] > slow[1] &&
-      rsi[0] > BuyRSILevel;
+      rsi[1] >= BuyRSI;
 
    bool sellSignal =
-      fast[0] >= slow[0] &&
+      fast[2] >= slow[2] &&
       fast[1] < slow[1] &&
-      rsi[0] < SellRSILevel;
+      rsi[1] <= SellRSI;
 
-   // Only one position per chart symbol
+   if(!buySignal && !sellSignal)
+      return;
+
+   // Do not open another position on this symbol.
    if(PositionSelect(_Symbol))
       return;
 
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+
+   if(ask <= 0 || bid <= 0 || point <= 0)
+      return;
+
+   double sl, tp;
+
    if(buySignal)
    {
-      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      double sl = NormalizeDouble(
-         ask - StopLossPoints * _Point, _Digits);
-      double tp = NormalizeDouble(
-         ask + TakeProfitPoints * _Point, _Digits);
+      sl = NormalizeDouble(
+         ask - StopLossPoints * point, digits);
+      tp = NormalizeDouble(
+         ask + TakeProfitPoints * point, digits);
 
-      if(trade.Buy(LotSize, _Symbol, 0, sl, tp,
-                   "GoldBot EMA RSI BUY"))
-         Print("BUY order sent");
-      else
-         Print("BUY failed: ", trade.ResultRetcodeDescription());
+      if(!trade.Buy(LotSize, _Symbol, 0, sl, tp, "EMA RSI Buy"))
+         Print("Buy failed: ", trade.ResultRetcodeDescription());
    }
    else if(sellSignal)
    {
-      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      double sl = NormalizeDouble(
-         bid + StopLossPoints * _Point, _Digits);
-      double tp = NormalizeDouble(
-         bid - TakeProfitPoints * _Point, _Digits);
+      sl = NormalizeDouble(
+         bid + StopLossPoints * point, digits);
+      tp = NormalizeDouble(
+         bid - TakeProfitPoints * point, digits);
 
-      if(trade.Sell(LotSize, _Symbol, 0, sl, tp,
-                    "GoldBot EMA RSI SELL"))
-         Print("SELL order sent");
-      else
-         Print("SELL failed: ", trade.ResultRetcodeDescription());
+      if(!trade.Sell(LotSize, _Symbol, 0, sl, tp, "EMA RSI Sell"))
+         Print("Sell failed: ", trade.ResultRetcodeDescription());
    }
 }
